@@ -1,0 +1,19 @@
+[2025-01-14 14:24:55] [0;31mERROR: This script must be run as root[0m
+[2025-01-14 22:55:02] [0;31mERROR: This script must be run as root[0m
+[2025-01-14 22:55:13] [0;31mERROR: This script must be run as root[0m
+[2025-01-14 22:55:13] [0;31mERROR: This script must be run as root[0m
+[2025-01-15 05:00:55] [0;31mERROR: This script must be run as root[0m
+[2025-01-15 05:17:19] [0;31mERROR: This script must be run as root[0m
+[2025-01-15 05:17:27] [0;31mERROR: Required dependency 'paru' is not installed[0m
+[2025-01-15 05:17:50] [0;31mERROR: This script must be run as root[0m
+[2025-01-15 05:18:42] [0;31mERROR: This script must be run as root[0m
+[2025-01-15 05:21:23] [0;31mERROR: This script must be run as root[0m
+[2025-01-15 05:22:06] [0;31mERROR: Required dependency 'base-devel' is not installed[0m
+[2025-01-15 05:25:18] [0;31mERROR: Required dependency 'base-devel' is not installed[0m
+[2025-01-15 05:25:41] [0;31mERROR: Required dependency 'base-devel' is not installed[0m
+[2025-01-15 05:26:44] [0;31mERROR: This script must be run as root[0m
+[2025-01-15 05:26:55] [0;31mERROR: Required dependency 'base-devel' is not installed[0m
+[2025-01-15 05:31:11] [0;31mERROR: Required dependency 'python-pip' is not installed[0m
+[2025-01-15 05:31:36] [0;31mERROR: Required dependency 'python-pip' is not installed[0m
+[2025-01-15 05:32:04] [0;31mERROR: Required dependency 'python-pip' is not installed[0m
+[2025-01-15 05:32:31] [0;31mERROR: Required dependency 'rust' is not installed[0m

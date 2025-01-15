@@ -108,17 +108,26 @@ check_root() {
 
 # Dependency check
 check_dependencies() {
-    local deps=(
-        "git" "curl" "wget" "jq" "yay" "paru"
-        "base-devel" "cmake" "make" "gcc"
-        "python" "python-pip" "rust" "go"
-    )
-    for dep in "${deps[@]}"; do
+    # Define core base-devel components to check
+    local base_devel_deps=("gcc" "make" "autoconf" "automake" "binutils" "libtool")
+    local binary_deps=("git" "curl" "wget" "jq" "yay" "paru" "cmake" "python" "pip" "rust" "go")
+
+    # Check binary dependencies using command -v
+    for dep in "${binary_deps[@]}"; do
         if ! command -v "$dep" &> /dev/null; then
             log_error "Required dependency '$dep' is not installed"
             return 1
         fi
     done
+
+    # Check base-devel components using pacman
+    for dep in "${base_devel_deps[@]}"; do
+        if ! pacman -Qi "$dep" &> /dev/null; then
+            log_error "Required base-devel component '$dep' is not installed"
+            return 1
+        fi
+    done
+
     return 0
 }
 

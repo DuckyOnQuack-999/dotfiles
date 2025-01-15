@@ -33,6 +33,8 @@ ICON_COMPLETE="🎉"
 
 # Configuration
 BACKUP_DIR="$HOME/.config/system_backups/$(date +%Y%m%d_%H%M%S)"
+METRICS_DIR="$HOME/.local/share/system_metrics"
+JSON_LOG="$HOME/.local/share/update_logs/updates.json"
 IMPORTANT_CONFIGS=(
     "$HOME/.config/hypr"
     "$HOME/.config/kde"
@@ -48,17 +50,246 @@ LOG_FILE="$HOME/update_log_$(date +%Y%m%d_%H%M%S).log"
 ERROR_LOG="$HOME/update_errors_$(date +%Y%m%d_%H%M%S).log"
 BACKUP_LOG="$HOME/backup_log_$(date +%Y%m%d_%H%M%S).log"
 
-# Enhanced logging function
+# Enhanced logging function with JSON support
 log_message() {
     local level="$1"
     local message="$2"
+    local component="${3:-system}"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    # Standard log output
     case "$level" in
         "INFO")  echo -e "${GREEN}[INFO]${NC} $timestamp - $message" | tee -a "$LOG_FILE" ;;
         "WARN")  echo -e "${YELLOW}[WARN]${NC} $timestamp - $message" | tee -a "$LOG_FILE" ;;
         "ERROR") echo -e "${RED}[ERROR]${NC} $timestamp - $message" | tee -a "$ERROR_LOG" ;;
         *)       echo -e "$timestamp - $message" | tee -a "$LOG_FILE" ;;
     esac
+    
+    # JSON structured logging
+    mkdir -p "$(dirname "$JSON_LOG")"
+    local json_entry=$(printf '{"timestamp":"%s","level":"%s","component":"%s","message":"%s"}\n' \
+        "$timestamp" "$level" "$component" "$message")
+    echo "$json_entry" >> "$JSON_LOG"
+}
+
+# Component evaluation function
+evaluate_component() {
+    local component="$1"
+    local detailed="${2:-false}"
+    echo -e "\n${BLUE}${ICON_CONFIG} Evaluating component: $component${NC}"
+    
+    # Get component status
+    local status="unknown"
+    local version=""
+    local cpu_usage=""
+    local mem_usage=""
+    
+    # Check if component is running
+    if pgrep -x "$component" >/dev/null; then
+        status="running"
+        pid=$(pgrep -x "$component")
+        cpu_usage=$(ps -p $pid -o %cpu --no-headers)
+        mem_usage=$(ps -p $pid -o %mem --no-headers)
+        version=$(pacman -Q "$component" 2>/dev/null | awk '{print $2}')
+    fi
+    
+    # Create detailed report
+    local report="Status: $status"
+    [ -n "$version" ] && report="$report\nVersion: $version"
+    [ -n "$cpu_usage" ] && report="$report\nCPU Usage: $cpu_usage%"
+    [ -n "$mem_usage" ] && report="$report\nMemory Usage: $mem_usage%"
+    
+    # Log component state
+    log_message "INFO" "Component $component evaluation: $status" "$component"
+    
+    if [ "$detailed" = "true" ]; then
+        echo -e "$report"
+    else
+        echo -e "Component $component is $status"
+    fi
+    
+    return $([ "$status" = "running" ] && echo 0 || echo 1)
+}
+
+# Dependency analysis function
+analyze_dependencies() {
+    local component="$1"
+    echo -e "\n${BLUE}${ICON_PACKAGE} Analyzing dependencies for: $component${NC}"
+    
+    # Get direct dependencies
+    local deps=$(pacman -Qi "$component" 2>/dev/null | grep "Depends On" | cut -d: -f2-)
+    
+    # Check each dependency
+    echo -e "${CYAN}Dependencies:${NC}"
+    for dep in $deps; do
+        if pacman -Qi "$dep" &>/dev/null; then
+            local version=$(pacman -Q "$dep" | awk '{print $2}')
+            echo -e "${GREEN}${ICON_CHECK} $dep: $version${NC}"
+        else
+            echo -e "${RED}${ICON_ERROR} $dep: Not installed${NC}"
+            log_message "ERROR" "Missing dependency: $dep" "$component"
+        fi
+    done
+}
+
+# Component verification function
+verify_component() {
+    local component="$1"
+    echo -e "\n${BLUE}${ICON_CONFIG} Verifying component: $component${NC}"
+    
+    # Create snapshot
+    local snapshot_dir="$BACKUP_DIR/$component"
+    mkdir -p "$snapshot_dir"
+    
+    # Check configuration files
+    if [ -d "/etc/$component" ]; then
+        cp -r "/etc/$component" "$snapshot_dir/"
+        echo -e "${GREEN}${ICON_BACKUP} Configuration snapshot created${NC}"
+    fi
+    
+    # Check for conflicts
+    local conflicts=$(pacman -Qc "$component" 2>/dev/null)
+    if [ -n "$conflicts" ]; then
+        echo -e "${YELLOW}${ICON_WARN} Potential conflicts detected:${NC}"
+        echo "$conflicts"
+        log_message "WARN" "Package conflicts detected for $component" "$component"
+    fi
+    
+    # Verify integrity
+    if pacman -Qk "$component" &>/dev/null; then
+        echo -e "${GREEN}${ICON_CHECK} Package integrity verified${NC}"
+    else
+        echo -e "${RED}${ICON_ERROR} Package integrity check failed${NC}"
+        log_message "ERROR" "Integrity check failed for $component" "$component"
+    fi
+}
+
+# Component error handler
+handle_component_error() {
+    local component="$1"
+    local error_type="$2"
+    local error_msg="$3"
+    
+    echo -e "\n${RED}${ICON_ERROR} Error in component $component: $error_msg${NC}"
+    log_message "ERROR" "$error_msg" "$component"
+    
+    case "$error_type" in
+        "crash")
+            echo -e "${YELLOW}Attempting to restart $component...${NC}"
+            systemctl --user restart "$component" 2>/dev/null || \
+            systemctl restart "$component" 2>/dev/null
+            ;;
+        "config")
+            echo -e "${YELLOW}Attempting to restore configuration from backup...${NC}"
+            if [ -d "$BACKUP_DIR/$component" ]; then
+                sudo cp -r "$BACKUP_DIR/$component"/* "/etc/$component/"
+            fi
+            ;;
+        "dependency")
+            echo -e "${YELLOW}Attempting to reinstall dependencies...${NC}"
+            analyze_dependencies "$component"
+            sudo pacman -S --needed "$component"
+            ;;
+        *)
+            echo -e "${YELLOW}Unknown error type. Manual intervention required.${NC}"
+            ;;
+    esac
+}
+
+# Performance monitoring function
+monitor_component() {
+    local component="$1"
+    local pid=$(pgrep -x "$component")
+    mkdir -p "$METRICS_DIR"
+    
+    while [ -e /proc/$pid ]; do
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        local cpu=$(ps -p $pid -o %cpu --no-headers)
+        local mem=$(ps -p $pid -o %mem --no-headers)
+        local threads=$(ps -p $pid -o nlwp --no-headers)
+        
+        # Store metrics
+        echo "$timestamp,$cpu,$mem,$threads" >> "$METRICS_DIR/${component}_metrics.csv"
+        
+        # Real-time display
+        printf "\r${CYAN}%s${NC} - CPU: %5s%% MEM: %5s%% Threads: %3s" \
+            "$component" "$cpu" "$mem" "$threads"
+        
+        sleep 1
+    done
+    printf "\n"
+}
+
+# Function to check process status
+check_process() {
+    local process_name="$1"
+    local friendly_name="${2:-$1}"
+    if pgrep -x "$process_name" >/dev/null; then
+        echo -e "${GREEN}${ICON_CHECK} $friendly_name is running${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}${ICON_WARN} $friendly_name is not running${NC}"
+        log_message "WARN" "$friendly_name is not running"
+        return 1
+    fi
+}
+
+# Function to check systemd status
+check_systemd_errors() {
+    echo -e "\n${BLUE}${ICON_CONFIG} Checking systemd status...${NC}"
+    local systemd_errors=$(journalctl -p 3..0 -b | grep -i "failed\|error" | tail -n 5)
+    local failed_units=$(systemctl --failed --no-legend)
+    local user_failed_units=$(systemctl --user --failed --no-legend)
+    
+    if [ -n "$systemd_errors" ] || [ -n "$failed_units" ] || [ -n "$user_failed_units" ]; then
+        echo -e "${YELLOW}${ICON_WARN} System service issues detected:${NC}"
+        [ -n "$systemd_errors" ] && echo -e "\nRecent systemd errors:\n$systemd_errors"
+        [ -n "$failed_units" ] && echo -e "\nFailed system units:\n$failed_units"
+        [ -n "$user_failed_units" ] && echo -e "\nFailed user units:\n$user_failed_units"
+        return 1
+    fi
+    echo -e "${GREEN}${ICON_CHECK} No systemd errors detected${NC}"
+    return 0
+}
+
+# Function to check system performance
+check_system_stats() {
+    echo -e "\n${BLUE}${ICON_SYSTEM} Checking system statistics...${NC}"
+    
+    # CPU load
+    local cpu_load=$(uptime | awk -F'load average:' '{ print $2 }' | cut -d, -f1)
+    echo -e "CPU Load: $cpu_load"
+    
+    # Memory usage
+    echo -e "\nMemory Usage:"
+    free -h | grep -v + | sed 's/^/  /'
+    
+    # Disk usage
+    echo -e "\nDisk Usage:"
+    df -h / /home 2>/dev/null | sed 's/^/  /'
+    
+    # Network stats
+    echo -e "\nNetwork Interfaces:"
+    ip -br addr | grep -v '^lo' | sed 's/^/  /'
+}
+
+# Function to check security status
+check_security_status() {
+    echo -e "\n${BLUE}${ICON_CONFIG} Checking security status...${NC}"
+    
+    # Check SSH
+    if [ -f "/etc/ssh/sshd_config" ]; then
+        echo -e "SSH Configuration:"
+        grep -E "^Port|^PermitRootLogin|^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | sed 's/^/  /'
+    fi
+    
+    # Check running services
+    echo -e "\nPotentially sensitive services:"
+    systemctl list-units --type=service --state=running | grep -E "ftp|telnet|vnc|rdp" | sed 's/^/  /'
+    
+    # Check last logins
+    echo -e "\nRecent logins:"
+    last -n 5 | sed 's/^/  /'
 }
 
 # Function to handle errors
@@ -107,109 +338,9 @@ check_network() {
     return 0
 }
 
-# Function to detect hardware acceleration
-detect_hardware_accel() {
-    # Check Vulkan support
-    if command -v vulkaninfo >/dev/null 2>&1; then
-        VULKAN_SUPPORT=1
-        VULKAN_INFO=$(vulkaninfo 2>/dev/null | grep -m1 "deviceName" | cut -d'=' -f2-)
-        log_message "INFO" "Vulkan support detected: $VULKAN_INFO"
-    fi
-
-    # Check OpenGL support
-    if command -v glxinfo >/dev/null 2>&1; then
-        OPENGL_SUPPORT=1
-        OPENGL_INFO=$(glxinfo | grep -m1 "OpenGL version" | cut -d':' -f2-)
-        log_message "INFO" "OpenGL support detected: $OPENGL_INFO"
-    fi
-
-    # Check XWayland
-    if pgrep -x "Xwayland" >/dev/null; then
-        XWAYLAND=1
-        log_message "INFO" "XWayland is running"
-    fi
-}
-
-# Function to detect multi-monitor setup
-detect_monitors() {
-    if command -v xrandr >/dev/null 2>&1 && [ -n "$DISPLAY" ]; then
-        MONITOR_INFO=$(xrandr --listmonitors | tail -n +2)
-        MONITOR_COUNT=$(echo "$MONITOR_INFO" | wc -l)
-        PRIMARY_MONITOR=$(xrandr --listmonitors | grep "*" | awk '{print $4}')
-    elif command -v wlr-randr >/dev/null 2>&1; then
-        MONITOR_INFO=$(wlr-randr 2>/dev/null)
-        MONITOR_COUNT=$(echo "$MONITOR_INFO" | grep -c "^[A-Z]")
-    fi
-    log_message "INFO" "Detected $MONITOR_COUNT monitor(s)"
-}
-
-# Function to detect GPU details
-detect_gpu_details() {
-    # NVIDIA GPU detection
-    if lspci | grep -i nvidia >/dev/null; then
-        NVIDIA_GPU=1
-        NVIDIA_MODEL=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null)
-        NVIDIA_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)
-    fi
-
-    # AMD GPU detection
-    if lspci | grep -i amd >/dev/null; then
-        AMD_GPU=1
-        AMD_MODEL=$(lspci | grep -i amd | grep VGA | cut -d':' -f3)
-        AMD_DRIVER=$(glxinfo 2>/dev/null | grep "OpenGL vendor" | cut -d':' -f2)
-    fi
-
-    # Intel GPU detection
-    if lspci | grep -i intel | grep -i vga >/dev/null; then
-        INTEL_GPU=1
-        INTEL_MODEL=$(lspci | grep -i intel | grep VGA | cut -d':' -f3)
-        INTEL_DRIVER=$(glxinfo 2>/dev/null | grep "OpenGL vendor" | cut -d':' -f2)
-    fi
-}
-
-# Function to detect theme and color scheme
-detect_theme() {
-    # GTK theme detection
-    if command -v gsettings >/dev/null 2>&1; then
-        GTK_THEME=$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null)
-        ICON_THEME=$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null)
-    fi
-
-    # Qt theme detection
-    if [ -f "$HOME/.config/qt5ct/qt5ct.conf" ]; then
-        QT_THEME=$(grep "^style=" "$HOME/.config/qt5ct/qt5ct.conf" | cut -d'=' -f2)
-    fi
-
-    # Color scheme detection
-    if [ -n "$XDG_CONFIG_HOME" ]; then
-        if [ -f "$XDG_CONFIG_HOME/gtk-3.0/settings.ini" ]; then
-            COLOR_SCHEME=$(grep "gtk-application-prefer-dark-theme" "$XDG_CONFIG_HOME/gtk-3.0/settings.ini" | cut -d'=' -f2)
-        fi
-    fi
-}
-
 # Function to detect and configure environment
 detect_environment() {
     echo -e "\n${CYAN}${ICON_SYSTEM} Detecting system environment...${NC}"
-    
-    # Reset all environment variables
-    unset WAYLAND X11 KDE GNOME XFCE MATE CINNAMON LXQT LXDE 
-    unset HYPRLAND SWAY I3WM BSPWM AWESOME DWM QTILE XMONAD OPENBOX FLUXBOX LEFTWM HERBSTLUFTWM
-    unset PICOM COMPTON WM_NAME DE_NAME
-    unset VULKAN_SUPPORT OPENGL_SUPPORT XWAYLAND
-    unset NVIDIA_GPU AMD_GPU INTEL_GPU
-    unset GTK_THEME QT_THEME COLOR_SCHEME
-    unset XDG_CURRENT_DE DESKTOP_SESSION_TYPE PRIMARY_MONITOR MONITOR_COUNT
-
-    # Get session details
-    XDG_CURRENT_DE="$XDG_CURRENT_DESKTOP"
-    DESKTOP_SESSION_TYPE="$DESKTOP_SESSION"
-
-    # Detect hardware and display features
-    detect_hardware_accel
-    detect_monitors
-    detect_gpu_details
-    detect_theme
     
     # Session type detection
     if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
@@ -217,109 +348,23 @@ detect_environment() {
         log_message "INFO" "Wayland session detected"
         echo -e "${GREEN}${ICON_CHECK} Wayland session detected${NC}"
         
-        # Wayland compositor detection
+        # Hyprland detection
         if pgrep -x "Hyprland" >/dev/null; then
             HYPRLAND=1
             log_message "INFO" "Hyprland compositor detected"
             echo -e "${GREEN}${ICON_CHECK} Hyprland compositor detected${NC}"
-        elif pgrep -x "sway" >/dev/null; then
-            SWAY=1
-            log_message "INFO" "Sway compositor detected"
-            echo -e "${GREEN}${ICON_CHECK} Sway compositor detected${NC}"
         fi
     else
         X11=1
         log_message "INFO" "X11 session detected"
         echo -e "${GREEN}${ICON_CHECK} X11 session detected${NC}"
-        
-        # X11 compositor detection
-        if pgrep -x "picom" >/dev/null; then
-            PICOM=1
-            log_message "INFO" "Picom compositor detected"
-            echo -e "${GREEN}${ICON_CHECK} Picom compositor detected${NC}"
-        elif pgrep -x "compton" >/dev/null; then
-            COMPTON=1
-            log_message "INFO" "Compton compositor detected"
-            echo -e "${GREEN}${ICON_CHECK} Compton compositor detected${NC}"
-        fi
     fi
 
     # Desktop environment detection
     if pgrep -x "plasmashell" >/dev/null; then
         KDE=1
-        DE_NAME="KDE Plasma"
         log_message "INFO" "KDE Plasma detected"
         echo -e "${GREEN}${ICON_CHECK} KDE Plasma detected${NC}"
-    elif pgrep -x "gnome-shell" >/dev/null; then
-        GNOME=1
-        DE_NAME="GNOME"
-        log_message "INFO" "GNOME detected"
-        echo -e "${GREEN}${ICON_CHECK} GNOME detected${NC}"
-    elif pgrep -x "xfce4-session" >/dev/null; then
-        XFCE=1
-        DE_NAME="XFCE"
-        log_message "INFO" "XFCE detected"
-        echo -e "${GREEN}${ICON_CHECK} XFCE detected${NC}"
-    elif pgrep -x "mate-session" >/dev/null; then
-        MATE=1
-        DE_NAME="MATE"
-        log_message "INFO" "MATE detected"
-        echo -e "${GREEN}${ICON_CHECK} MATE detected${NC}"
-    elif pgrep -x "cinnamon-session" >/dev/null; then
-        CINNAMON=1
-        DE_NAME="Cinnamon"
-        log_message "INFO" "Cinnamon detected"
-        echo -e "${GREEN}${ICON_CHECK} Cinnamon detected${NC}"
-    elif pgrep -x "lxqt-session" >/dev/null; then
-        LXQT=1
-        DE_NAME="LXQt"
-        log_message "INFO" "LXQt detected"
-        echo -e "${GREEN}${ICON_CHECK} LXQt detected${NC}"
-    elif pgrep -x "lxsession" >/dev/null; then
-        LXDE=1
-        DE_NAME="LXDE"
-        log_message "INFO" "LXDE detected"
-        echo -e "${GREEN}${ICON_CHECK} LXDE detected${NC}"
-    fi
-
-    # Window manager detection
-    if [ -z "$DE_NAME" ]; then
-        if pgrep -x "i3" >/dev/null; then
-            I3WM=1
-            WM_NAME="i3"
-        elif pgrep -x "openbox" >/dev/null; then
-            OPENBOX=1
-            WM_NAME="Openbox"
-        elif pgrep -x "fluxbox" >/dev/null; then
-            FLUXBOX=1
-            WM_NAME="Fluxbox"
-        elif pgrep -x "leftwm" >/dev/null; then
-            LEFTWM=1
-            WM_NAME="LeftWM"
-        elif pgrep -x "herbstluftwm" >/dev/null; then
-            HERBSTLUFTWM=1
-            WM_NAME="herbstluftwm"
-        elif pgrep -x "bspwm" >/dev/null; then
-            BSPWM=1
-            WM_NAME="bspwm"
-        elif pgrep -x "awesome" >/dev/null; then
-            AWESOME=1
-            WM_NAME="awesome"
-        elif pgrep -x "dwm" >/dev/null; then
-            DWM=1
-            WM_NAME="dwm"
-        elif pgrep -x "qtile" >/dev/null; then
-            QTILE=1
-            WM_NAME="qtile"
-        elif pgrep -x "xmonad" >/dev/null; then
-            XMONAD=1
-            WM_NAME="xmonad"
-        fi
-
-        if [ -n "$WM_NAME" ]; then
-            log_message "INFO" "$WM_NAME window manager detected"
-            echo -e "${GREEN}${ICON_CHECK} $WM_NAME window manager detected${NC}"
-        fi
     fi
 }
 
@@ -346,67 +391,18 @@ check_system_resources() {
         echo -e "${YELLOW}${ICON_WARN} Warning: Low disk space!${NC}"
     fi
 }
-# Modern progress bar styles and functions
-PROGRESS_CHARS=('▏' '▎' '▍' '▌' '▋' '▊' '▉' '█')
-SPINNER_CHARS=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-
-show_modern_progress() {
+# Modern progress bar function
+show_progress() {
     local current=$1
     local total=$2
-    local message="${3:-}"
-    local style="${4:-normal}"
-    local width=40
-    
-    # Calculate percentage and bar segments
+    local width=50
     local percentage=$((current * 100 / total))
     local filled=$((width * current / total))
-    local partial=$((((width * current * 8) / total) % 8))
-    local empty=$((width - filled - 1))
-    
-    # Color gradient calculation
-    local color_start="\033[38;2;87;181;255m"
-    local color_mid="\033[38;2;150;255;150m"
-    local color_end="\033[38;2;255;150;150m"
-    
-    case "$style" in
-        "detailed")
-            printf "\r${BOLD}${message:+$message }${NC}"
-            printf "${BLUE}["
-            for ((i = 0; i < filled; i++)); do
-                if [ $i -lt $((filled/3)) ]; then
-                    printf "${color_start}█"
-                elif [ $i -lt $((filled*2/3)) ]; then
-                    printf "${color_mid}█"
-                else
-                    printf "${color_end}█"
-                fi
-            done
-            [ $partial -gt 0 ] && printf "${color_end}${PROGRESS_CHARS[$partial]}"
-            for ((i = 0; i < empty; i++)); do printf "░"; done
-            printf "${NC}] ${YELLOW}%3d%%${NC}" $percentage
-            ;;
-        
-        "spinner")
-            local spinner_idx=$(((current / 1) % ${#SPINNER_CHARS[@]}))
-            printf "\r${CYAN}${SPINNER_CHARS[$spinner_idx]}${NC} ${message:+$message }${BLUE}%3d%%${NC}" $percentage
-            ;;
-        
-        *)  # normal style
-            printf "\r${message:+$message }${BLUE}["
-            for ((i = 0; i < filled; i++)); do printf "▓"; done
-            [ $partial -gt 0 ] && printf "${PROGRESS_CHARS[$partial]}"
-            for ((i = 0; i < empty; i++)); do printf "░"; done
-            printf "]${NC} ${YELLOW}%3d%%${NC}" $percentage
-            ;;
-    esac
-    
-    # Add newline if process is complete
-    [ $current -eq $total ] && echo
-}
-
-# Legacy progress function for compatibility
-show_progress() {
-    show_modern_progress "$1" "$2" "" "normal"
+    local empty=$((width - filled))
+    printf "\r${BLUE}["
+    printf "%${filled}s" | tr ' ' '▓'
+    printf "%${empty}s" | tr ' ' '░'
+    printf "]${NC} %3d%%" $percentage
 }
 
 # System resource monitor
@@ -434,7 +430,6 @@ backup_configs() {
         ((current++))
         if [ -e "$config" ]; then
             show_progress $current $total
-            show_modern_progress "$current" "$total" "Backing up configs" "detailed"
             cp -r "$config" "$BACKUP_DIR/" 2>/dev/null
             log_message "INFO" "Backed up: $config"
         fi
@@ -502,8 +497,177 @@ check_network
 echo -e "\n${YELLOW}⚠️  Reminder: Consider backing up important data before proceeding${NC}"
 read -p "Press Enter to continue or Ctrl+C to cancel..."
 
-# System health check
-echo -e "\n${BLUE}Performing system health check...${NC}"
+# Comprehensive System Health Check
+echo -e "\n${CYAN}${ICON_SYSTEM} Performing comprehensive system health check...${NC}"
+echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Network interfaces and connections
+echo -e "\n${BLUE}${ICON_NETWORK} Checking network interfaces...${NC}"
+if ip link show | grep -v "lo:" >/dev/null; then
+    echo -e "${GREEN}${ICON_CHECK} Network interfaces detected${NC}"
+    for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo"); do
+        if ip addr show $iface | grep -q "inet "; then
+            echo -e "  ${GREEN}• $iface: Connected${NC}"
+        else
+            echo -e "  ${YELLOW}• $iface: Disconnected${NC}"
+            log_message "WARN" "Network interface $iface is disconnected"
+        fi
+    done
+else
+    echo -e "${RED}${ICON_ERROR} No network interfaces found${NC}"
+    log_message "ERROR" "No network interfaces detected"
+fi
+
+# Storage health check (SMART)
+echo -e "\n${BLUE}${ICON_DISK} Checking storage health...${NC}"
+if command -v smartctl >/dev/null; then
+    for drive in $(lsblk -d -n -o NAME | grep -E '^sd|^nvme'); do
+        echo -e "Checking /dev/$drive:"
+        if sudo smartctl -H /dev/$drive | grep -q "PASSED"; then
+            echo -e "  ${GREEN}${ICON_CHECK} SMART status: HEALTHY${NC}"
+        else
+            echo -e "  ${RED}${ICON_ERROR} SMART status: FAILING${NC}"
+            log_message "ERROR" "SMART check failed for /dev/$drive"
+        fi
+    done
+else
+    echo -e "${YELLOW}${ICON_WARN} smartctl not installed - skipping SMART checks${NC}"
+fi
+
+# Temperature monitoring
+echo -e "\n${BLUE}${ICON_CPU} Checking system temperatures...${NC}"
+if command -v sensors >/dev/null; then
+    temp_data=$(sensors)
+    cpu_temp=$(echo "$temp_data" | grep -i "Core 0:" | awk '{print $3}' | tr -d '+°C')
+    if [ -n "$cpu_temp" ]; then
+        if [ "${cpu_temp%.*}" -gt 80 ]; then
+            echo -e "  ${RED}• CPU Temperature: ${cpu_temp}°C (HIGH)${NC}"
+            log_message "WARN" "High CPU temperature detected: ${cpu_temp}°C"
+        else
+            echo -e "  ${GREEN}• CPU Temperature: ${cpu_temp}°C${NC}"
+        fi
+    fi
+    
+    # GPU temperature check
+    if command -v nvidia-smi >/dev/null; then
+        gpu_temp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader)
+        if [ -n "$gpu_temp" ]; then
+            if [ "$gpu_temp" -gt 80 ]; then
+                echo -e "  ${RED}• GPU Temperature: ${gpu_temp}°C (HIGH)${NC}"
+                log_message "WARN" "High GPU temperature detected: ${gpu_temp}°C"
+            else
+                echo -e "  ${GREEN}• GPU Temperature: ${gpu_temp}°C${NC}"
+            fi
+        fi
+    fi
+else
+    echo -e "${YELLOW}${ICON_WARN} sensors not installed - skipping temperature checks${NC}"
+fi
+
+# Systemd user services status
+echo -e "\n${BLUE}${ICON_CONFIG} Checking systemd user services...${NC}"
+failed_services=$(systemctl --user list-units --state=failed --no-legend)
+if [ -n "$failed_services" ]; then
+    echo -e "${RED}${ICON_ERROR} Failed user services detected:${NC}"
+    echo "$failed_services" | awk '{print "  • " $1 " - " $2}'
+    log_message "ERROR" "Failed user services detected"
+else
+    echo -e "${GREEN}${ICON_CHECK} All user services are running normally${NC}"
+fi
+
+# Audio system check
+echo -e "\n${BLUE}${ICON_CONFIG} Checking audio system...${NC}"
+if pgrep -x "pipewire" >/dev/null; then
+    echo -e "${GREEN}${ICON_CHECK} PipeWire is running${NC}"
+    if pactl info >/dev/null 2>&1; then
+        echo -e "  ${GREEN}• PulseAudio interface is active${NC}"
+    else
+        echo -e "  ${YELLOW}• PulseAudio interface is not responding${NC}"
+        log_message "WARN" "PulseAudio interface not responding"
+    fi
+else
+    echo -e "${RED}${ICON_ERROR} PipeWire is not running${NC}"
+    log_message "ERROR" "Audio system (PipeWire) is not running"
+fi
+
+# Flatpak system check
+if command -v flatpak >/dev/null; then
+    echo -e "\n${BLUE}${ICON_PACKAGE} Checking Flatpak system...${NC}"
+    if flatpak list --runtime | grep -q "org.freedesktop.Platform"; then
+        echo -e "${GREEN}${ICON_CHECK} Flatpak base runtime is installed${NC}"
+    else
+        echo -e "${YELLOW}${ICON_WARN} Flatpak base runtime missing${NC}"
+        log_message "WARN" "Flatpak base runtime is not installed"
+    fi
+fi
+
+# Firewall configuration
+echo -e "\n${BLUE}${ICON_CONFIG} Checking firewall status...${NC}"
+if command -v ufw >/dev/null; then
+    if sudo ufw status | grep -q "Status: active"; then
+        echo -e "${GREEN}${ICON_CHECK} UFW firewall is active${NC}"
+    else
+        echo -e "${YELLOW}${ICON_WARN} UFW firewall is inactive${NC}"
+        log_message "WARN" "Firewall is inactive"
+    fi
+elif command -v firewall-cmd >/dev/null; then
+    if sudo firewall-cmd --state | grep -q "running"; then
+        echo -e "${GREEN}${ICON_CHECK} FirewallD is active${NC}"
+    else
+        echo -e "${YELLOW}${ICON_WARN} FirewallD is inactive${NC}"
+        log_message "WARN" "Firewall is inactive"
+    fi
+fi
+
+# Bluetooth status
+echo -e "\n${BLUE}${ICON_CONFIG} Checking Bluetooth status...${NC}"
+if systemctl is-active bluetooth >/dev/null 2>&1; then
+    echo -e "${GREEN}${ICON_CHECK} Bluetooth service is active${NC}"
+    if bluetoothctl show | grep -q "Powered: yes"; then
+        echo -e "  ${GREEN}• Bluetooth adapter is powered on${NC}"
+    else
+        echo -e "  ${YELLOW}• Bluetooth adapter is powered off${NC}"
+    fi
+else
+    echo -e "${YELLOW}${ICON_WARN} Bluetooth service is not running${NC}"
+fi
+
+# Power management
+echo -e "\n${BLUE}${ICON_CONFIG} Checking power management...${NC}"
+if command -v tlp >/dev/null; then
+    if systemctl is-active tlp >/dev/null 2>&1; then
+        echo -e "${GREEN}${ICON_CHECK} TLP power management is active${NC}"
+    else
+        echo -e "${YELLOW}${ICON_WARN} TLP is installed but not active${NC}"
+    fi
+else
+    echo -e "${YELLOW}${ICON_WARN} TLP is not installed${NC}"
+fi
+
+# System security checks
+echo -e "\n${BLUE}${ICON_CONFIG} Performing security checks...${NC}"
+# Check failed login attempts
+failed_logins=$(journalctl -u systemd-logind -b | grep "Failed password" | wc -l)
+if [ "$failed_logins" -gt 0 ]; then
+    echo -e "${YELLOW}${ICON_WARN} Detected $failed_logins failed login attempts${NC}"
+    log_message "WARN" "Multiple failed login attempts detected"
+else
+    echo -e "${GREEN}${ICON_CHECK} No failed login attempts${NC}"
+fi
+
+# Check active SSH sessions
+ssh_sessions=$(who | grep pts | wc -l)
+if [ "$ssh_sessions" -gt 0 ]; then
+    echo -e "${YELLOW}${ICON_WARN} $ssh_sessions active SSH session(s)${NC}"
+    who | grep pts | awk '{print "  • Connection from: " $5}'
+else
+    echo -e "${GREEN}${ICON_CHECK} No active SSH sessions${NC}"
+fi
+
+echo -e "\n${CYAN}${ICON_SYSTEM} System health check complete${NC}"
+echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Disk space check
 df -h / | tail -n 1 | awk '{ print $5 }' | cut -d'%' -f1 | {
     read usage
     if [ "$usage" -gt 90 ]; then
@@ -515,11 +679,6 @@ df -h / | tail -n 1 | awk '{ print $5 }' | cut -d'%' -f1 | {
     fi
 }
 
-    # Initialize update counters
-    SYSTEM_PACKAGES_UPDATED=0
-    AUR_PACKAGES_UPDATED=0
-    FLATPAK_PACKAGES_UPDATED=0
-
     log_message "Starting system package updates"
     echo -e "\n${CYAN}${ICON_PACKAGE} Updating system packages...${NC}"
 
@@ -527,14 +686,11 @@ df -h / | tail -n 1 | awk '{ print $5 }' | cut -d'%' -f1 | {
     monitor_resources $$ &
     monitor_pid=$!
 
-    SYSTEM_PACKAGES_BEFORE=$(pacman -Q | wc -l)
     if ! sudo pacman -Syu --noconfirm; then
         kill $monitor_pid 2>/dev/null
         handle_error "System package update failed" "PACMAN_ERROR"
         exit 1
     fi
-    SYSTEM_PACKAGES_AFTER=$(pacman -Q | wc -l)
-    SYSTEM_PACKAGES_UPDATED=$((SYSTEM_PACKAGES_AFTER - SYSTEM_PACKAGES_BEFORE))
 
     kill $monitor_pid 2>/dev/null
     echo -e "${GREEN}${ICON_CHECK} System packages updated successfully${NC}"
@@ -544,13 +700,10 @@ if check_command yay; then
     log_message "Updating AUR packages using yay"
     monitor_resources $$ &
     monitor_pid=$!
-    AUR_PACKAGES_BEFORE=$(yay -Qm | wc -l)
     if ! yay -Sua --noconfirm; then
         kill $monitor_pid 2>/dev/null
         handle_error "AUR update failed" "AUR_ERROR"
     fi
-    AUR_PACKAGES_AFTER=$(yay -Qm | wc -l)
-    AUR_PACKAGES_UPDATED=$((AUR_PACKAGES_AFTER - AUR_PACKAGES_BEFORE))
     kill $monitor_pid 2>/dev/null
     echo -e "${GREEN}${ICON_CHECK} AUR packages updated successfully${NC}"
 elif check_command paru; then
@@ -572,15 +725,12 @@ if check_command flatpak; then
     log_message "Updating Flatpak packages"
     monitor_resources $$ &
     monitor_pid=$!
-    FLATPAK_PACKAGES_BEFORE=$(flatpak list | wc -l)
     if ! flatpak update -y; then
         kill $monitor_pid 2>/dev/null
         handle_error "Flatpak update failed" "FLATPAK_ERROR"
     else
         flatpak uninstall --unused -y
     fi
-    FLATPAK_PACKAGES_AFTER=$(flatpak list | wc -l)
-    FLATPAK_PACKAGES_UPDATED=$((FLATPAK_PACKAGES_AFTER - FLATPAK_PACKAGES_BEFORE))
     kill $monitor_pid 2>/dev/null
     echo -e "${GREEN}${ICON_CHECK} Flatpak packages updated successfully${NC}"
 fi
@@ -604,20 +754,6 @@ if sudo pacman -Sc --noconfirm; then
     log_message "Package cache cleaned (Before: $cache_size_before, After: $cache_size_after)"
     echo -e "${GREEN}${ICON_CHECK} Package cache cleaned ($cache_size_before → $cache_size_after)${NC}"
 fi
-
-# Show cleanup progress
-total_steps=5
-for ((i=1; i<=total_steps; i++)); do
-    case $i in
-        1) message="Removing old cache";;
-        2) message="Cleaning temp files";;
-        3) message="Optimizing database";;
-        4) message="Verifying integrity";;
-        5) message="Finalizing cleanup";;
-    esac
-    show_modern_progress "$i" "$total_steps" "$message" "spinner"
-    sleep 0.5
-done
 
 # Remove orphaned packages with details
 echo -e "${BLUE}${ICON_PACKAGE} Checking for orphaned packages...${NC}"
@@ -643,11 +779,8 @@ if sudo journalctl --vacuum-time=7d; then
 fi
 
 # Comprehensive system verification
-# Detect environment before system verification
-detect_environment
-
-# Comprehensive system verification 
 echo -e "\n${CYAN}${ICON_SYSTEM} Performing final system verification...${NC}"
+
 # Check system services
 echo -e "${BLUE}${ICON_CONFIG} Verifying system services...${NC}"
 failed_services=$(systemctl --failed)
@@ -659,29 +792,351 @@ else
     log_message "ERROR" "Failed system services detected"
 fi
 
-# Verify Wayland/Hyprland status if applicable
-if [ "$WAYLAND" = "1" ]; then
-    echo -e "${BLUE}${ICON_DESKTOP} Verifying Wayland components...${NC}"
-    if [ "$HYPRLAND" = "1" ]; then
-        if pgrep -x "Hyprland" >/dev/null; then
-            echo -e "${GREEN}${ICON_CHECK} Hyprland is running properly${NC}"
+# Check Window Manager and Desktop Status
+echo -e "${CYAN}${ICON_DESKTOP} Verifying Window Manager status...${NC}"
+
+# Function to check process status
+check_system_process() {
+    local process_name="$1"
+    local friendly_name="${2:-$1}"
+    local optional="${3:-false}"
+    
+    if pgrep -x "$process_name" >/dev/null; then
+        echo -e "${GREEN}${ICON_CHECK} $friendly_name is running${NC}"
+        return 0
+    else
+        if [ "$optional" = "true" ]; then
+            echo -e "${YELLOW}${ICON_WARN} Optional: $friendly_name is not running${NC}"
+            log_message "WARN" "Optional process $friendly_name is not running"
         else
-            echo -e "${YELLOW}${ICON_WARN} Hyprland service state inconsistent${NC}"
+            echo -e "${RED}${ICON_ERROR} Required: $friendly_name is not running${NC}"
+            log_message "ERROR" "Required process $friendly_name is not running"
         fi
+        return 1
+    fi
+}
+
+# Optimized function to check desktop environment status
+check_desktop_environment_status() {
+    local session_type="$XDG_SESSION_TYPE"
+    local de_type=""
+    
+    # Detect session and DE type
+    if [ "$session_type" = "wayland" ]; then
+        de_type="wayland"
+        [ -n "$(pgrep -x Hyprland)" ] && de_type="hyprland"
+        [ -n "$(pgrep -x sway)" ] && de_type="sway"
+    else
+        [ -n "$(pgrep -x plasmashell)" ] && de_type="kde"
+        [ -n "$(pgrep -x gnome-shell)" ] && de_type="gnome"
+        [ -n "$(pgrep -x xfce4-session)" ] && de_type="xfce"
+    fi
+    
+    echo -e "\n${BLUE}${ICON_DESKTOP} Checking desktop environment ($de_type)...${NC}"
+    
+    case "$de_type" in
+        "hyprland")
+            check_system_process "Hyprland" "Hyprland Compositor"
+            check_system_process "waybar" "Waybar"
+            check_system_process "dunst" "Dunst" "true"
+            check_system_process "polkit-gnome-au" "Polkit" "true"
+            ;;
+        "kde")
+            check_system_process "plasmashell" "Plasma Shell"
+            check_system_process "kwin_x11" "KWin" "true"
+            check_system_process "kwin_wayland" "KWin Wayland" "true"
+            ;;
+        *)
+            echo -e "${YELLOW}${ICON_WARN} Unknown or unsupported desktop environment${NC}"
+            ;;
+    esac
+}
+# Check Hyprland and critical components
+
+# Function to check package installation
+check_package() {
+    local pkg_name="$1"
+    if pacman -Qi "$pkg_name" &>/dev/null; then
+        echo -e "${GREEN}${ICON_CHECK} $pkg_name is installed${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}${ICON_WARN} $pkg_name is not installed${NC}"
+        log_message "WARN" "Missing package: $pkg_name"
+        return 1
+    fi
+}
+
+# Check compositor-related errors in journal
+echo -e "\n${BLUE}${ICON_CONFIG} Checking compositor logs...${NC}"
+compositor_errors=$(journalctl -b | grep -i "compositor\|wayland\|hyprland" | grep -i "error\|fail" | tail -n 5)
+if [ -n "$compositor_errors" ]; then
+    echo -e "${YELLOW}${ICON_WARN} Recent compositor-related errors found:${NC}"
+    echo "$compositor_errors" | sed 's/^/  /'
+    log_message "WARN" "Compositor errors detected in journal"
+else
+    echo -e "${GREEN}${ICON_CHECK} No recent compositor errors found${NC}"
+fi
+# Hyprland check
+check_hyprland() {
+    if [ "$HYPRLAND" = "1" ]; then
+        echo -e "${BLUE}${ICON_CONFIG} Checking Hyprland status...${NC}"
+        check_process "Hyprland" "Hyprland Compositor"
         
-        # Check Hyprland-specific components
-        for comp in "waybar" "wlogout" "hyprctl"; do
-            if command -v $comp >/dev/null; then
-                echo -e "${GREEN}${ICON_CHECK} $comp is available${NC}"
+        # Check essential Wayland components
+        check_process "waybar" "Waybar Status Bar"
+        check_process "dunst" "Dunst Notifications"
+        check_process "polkit-gnome-au" "Polkit Authentication Agent"
+
+        # Check critical packages for Hyprland
+        echo -e "${BLUE}${ICON_PACKAGE} Checking required packages...${NC}"
+        check_package "xdg-desktop-portal-hyprland"
+        check_package "qt6-wayland"
+        check_package "xdg-utils"
+        check_package "polkit-gnome"
+
+        # Check XDG Desktop Portal status
+        echo -e "\n${BLUE}${ICON_CONFIG} Checking XDG Desktop Portal...${NC}"
+        if systemctl --user status xdg-desktop-portal.service &>/dev/null; then
+            echo -e "${GREEN}${ICON_CHECK} XDG Desktop Portal is running${NC}"
+            # Check portal implementations
+            if systemctl --user status xdg-desktop-portal-hyprland.service &>/dev/null; then
+                echo -e "${GREEN}${ICON_CHECK} Hyprland Portal implementation is active${NC}"
             else
-                echo -e "${YELLOW}${ICON_WARN} $comp not found${NC}"
+                echo -e "${YELLOW}${ICON_WARN} Hyprland Portal implementation not running${NC}"
+                log_message "WARN" "xdg-desktop-portal-hyprland service not active"
+            fi
+        else
+            echo -e "${RED}${ICON_ERROR} XDG Desktop Portal is not running${NC}"
+            log_message "ERROR" "XDG Desktop Portal service not running"
+        fi
+
+        # Check DBus session
+        echo -e "\n${BLUE}${ICON_CONFIG} Checking DBus session...${NC}"
+        if [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
+            echo -e "${GREEN}${ICON_CHECK} DBus session is active${NC}"
+            # Test DBus functionality
+            if dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames &>/dev/null; then
+                echo -e "${GREEN}${ICON_CHECK} DBus communication working${NC}"
+            else
+                echo -e "${RED}${ICON_ERROR} DBus communication failed${NC}"
+                log_message "ERROR" "DBus communication test failed"
+            fi
+        else
+            echo -e "${RED}${ICON_ERROR} No DBus session found${NC}"
+            log_message "ERROR" "DBus session not found"
+        fi
+
+        # Monitor memory usage of key components
+        echo -e "\n${BLUE}${ICON_RAM} Checking component memory usage...${NC}"
+        for process in "Hyprland" "waybar" "dunst" "polkit-gnome-au" "xdg-desktop-portal" "pipewire"; do
+            mem_usage=$(ps -C "$process" -O rss --no-headers 2>/dev/null | awk '{sum+=$2} END {print sum/1024}')
+            if [ -n "$mem_usage" ]; then
+                echo -e "${GREEN}${ICON_CHECK} $process: ${mem_usage:.1f} MB${NC}"
+            else
+                echo -e "${YELLOW}${ICON_WARN} $process: Not running${NC}"
+                log_message "WARN" "$process is not running"
             fi
         done
-    fi
-fi
 
-# Detect environment before displaying summary
-detect_environment
+        # Check compositor-related errors in journal
+        echo -e "\n${BLUE}${ICON_CONFIG} Checking compositor logs...${NC}"
+        compositor_errors=$(journalctl -b | grep -i "compositor\\|wayland\\|hyprland" | grep -i "error\\|fail" | tail -n 5)
+        if [ -n "$compositor_errors" ]; then
+            echo -e "${YELLOW}${ICON_WARN} Recent compositor-related errors found:${NC}"
+            echo "$compositor_errors" | sed 's/^/  /'
+            log_message "WARN" "Compositor errors detected in journal"
+        else
+            echo -e "${GREEN}${ICON_CHECK} No recent compositor errors found${NC}"
+        fi
+    fi
+}
+
+# Call the function where needed
+check_hyprland
+
+# Function to check graphics drivers
+check_gpu_status() {
+    echo -e "\n${BLUE}${ICON_GPU} Checking graphics driver status...${NC}"
+    if lspci | grep -i nvidia >/dev/null; then
+        if ! nvidia-smi &>/dev/null; then
+            echo -e "${YELLOW}${ICON_WARN} NVIDIA driver issues detected${NC}"
+            log_message "WARN" "NVIDIA driver not responding properly"
+        else
+            echo -e "${GREEN}${ICON_CHECK} NVIDIA drivers working properly${NC}"
+        fi
+    fi
+}
+
+    # Display resolution and refresh rate
+    echo -e "\n${BLUE}${ICON_DESKTOP} Checking display settings...${NC}"
+    if command -v xrandr >/dev/null && [ -n "$DISPLAY" ]; then
+        xrandr --current | grep -w connected | while read -r line; do
+            echo -e "  ${GREEN}• $line${NC}"
+        done
+    elif command -v hyprctl >/dev/null; then
+        hyprctl monitors | grep -E "Monitor|resolution" | while read -r line; do
+            echo -e "  ${GREEN}• $line${NC}"
+        done
+    fi
+
+    # Bootloader Configuration
+    echo -e "\n${BLUE}${ICON_CONFIG} Checking bootloader configuration...${NC}"
+    if [ -d "/boot/grub" ]; then
+        echo -e "  ${GREEN}• GRUB detected${NC}"
+        if [ -f "/boot/grub/grub.cfg" ]; then
+            echo -e "  ${GREEN}• GRUB config present${NC}"
+            grub_time=$(stat -c %Y /boot/grub/grub.cfg)
+            echo -e "  ${BLUE}• Last updated: $(date -d "@$grub_time")${NC}"
+        fi
+    elif [ -d "/boot/loader" ]; then
+        echo -e "  ${GREEN}• systemd-boot detected${NC}"
+        bootctl status 2>/dev/null || echo -e "  ${YELLOW}• Unable to get bootloader status${NC}"
+    fi
+
+    # Virtualization Status
+    echo -e "\n${BLUE}${ICON_SYSTEM} Checking virtualization support...${NC}"
+    if grep -q "^flags.*vmx\|^flags.*svm" /proc/cpuinfo; then
+        echo -e "  ${GREEN}• CPU virtualization support: Yes${NC}"
+        for module in kvm kvm_intel kvm_amd vboxdrv; do
+            if lsmod | grep -q "^$module"; then
+                echo -e "  ${GREEN}• $module module: Loaded${NC}"
+            fi
+        done
+    else
+        echo -e "  ${YELLOW}• CPU virtualization support: No${NC}"
+    fi
+
+    # Microcode Updates
+    echo -e "\n${BLUE}${ICON_CPU} Checking microcode status...${NC}"
+    if [ -f "/sys/devices/system/cpu/microcode/reload" ]; then
+        if dmesg | grep -i "microcode updated early to" >/dev/null; then
+            echo -e "  ${GREEN}• Microcode is up to date${NC}"
+        else
+            echo -e "  ${YELLOW}• Microcode update may be needed${NC}"
+        fi
+    fi
+
+    # System Time Sync
+    echo -e "\n${BLUE}${ICON_CONFIG} Checking time synchronization...${NC}"
+    for timesync in systemd-timesyncd chronyd ntpd; do
+        if systemctl is-active $timesync >/dev/null 2>&1; then
+            echo -e "  ${GREEN}• $timesync is active and running${NC}"
+            if [ "$timesync" = "systemd-timesyncd" ]; then
+                timedatectl status | grep "System clock" | sed 's/^/  /'
+            fi
+        fi
+    done
+
+    # Font Configuration
+    echo -e "\n${BLUE}${ICON_CONFIG} Checking font configuration...${NC}"
+    if [ -f "$HOME/.config/fontconfig/fonts.conf" ]; then
+        echo -e "  ${GREEN}• User font configuration exists${NC}"
+    fi
+    if command -v fc-cache >/dev/null; then
+        echo -e "  ${GREEN}• Font cache is available${NC}"
+    fi
+
+    # Package Dependencies
+    echo -e "\n${BLUE}${ICON_PACKAGE} Checking package dependencies...${NC}"
+    if pacman -Qdt >/dev/null 2>&1; then
+        echo -e "  ${GREEN}• No orphaned packages found${NC}"
+    else
+        echo -e "  ${YELLOW}• Orphaned packages detected${NC}"
+        pacman -Qdt | sed 's/^/    /'
+    fi
+
+    # Swap/ZRAM Configuration
+    echo -e "\n${BLUE}${ICON_RAM} Checking swap/ZRAM configuration...${NC}"
+    if grep -q "zram" /proc/swaps; then
+        echo -e "  ${GREEN}• ZRAM is active${NC}"
+        echo -e "  ${BLUE}• ZRAM usage:${NC}"
+        swapon --show | grep zram | sed 's/^/    /'
+    fi
+    if [ -n "$(swapon --show)" ]; then
+        echo -e "  ${BLUE}• Swap status:${NC}"
+        free -h | grep "Swap:" | sed 's/^/    /'
+    fi
+
+    # Backup Status
+    echo -e "\n${BLUE}${ICON_BACKUP} Checking backup system status...${NC}"
+    for backup in timeshift snapper; do
+        if command -v $backup >/dev/null; then
+            echo -e "  ${GREEN}• $backup is installed${NC}"
+            case $backup in
+                timeshift)
+                    if timeshift --list >/dev/null 2>&1; then
+                        echo -e "  ${BLUE}• Recent backups:${NC}"
+                        timeshift --list | tail -n 3 | sed 's/^/    /'
+                    fi
+                    ;;
+                snapper)
+                    if snapper list >/dev/null 2>&1; then
+                        echo -e "  ${BLUE}• Recent snapshots:${NC}"
+                        snapper list | tail -n 3 | sed 's/^/    /'
+                    fi
+                    ;;
+            esac
+        fi
+    done
+
+    # Firmware Updates
+    echo -e "\n${BLUE}${ICON_UPDATE} Checking firmware updates...${NC}"
+    if command -v fwupdmgr >/dev/null; then
+        echo -e "  ${GREEN}• fwupd is installed${NC}"
+        if fwupdmgr get-devices >/dev/null 2>&1; then
+            echo -e "  ${BLUE}• Firmware status:${NC}"
+            fwupdmgr get-updates 2>/dev/null || echo -e "    No updates available"
+        fi
+    fi
+
+    # System File Integrity
+    echo -e "\n${BLUE}${ICON_CONFIG} Checking system file integrity...${NC}"
+    for integrity in aide tripwire; do
+        if command -v $integrity >/dev/null; then
+            echo -e "  ${GREEN}• $integrity is installed${NC}"
+            case $integrity in
+                aide)
+                    if [ -f "/var/lib/aide/aide.db.gz" ]; then
+                        echo -e "  ${BLUE}• AIDE database exists${NC}"
+                    fi
+                    ;;
+                tripwire)
+                    if [ -f "/var/lib/tripwire/$(hostname).twd" ]; then
+                        echo -e "  ${BLUE}• Tripwire database exists${NC}"
+                    fi
+                    ;;
+            esac
+        fi
+    done
+
+    # Update complete
+# Update complete
+# Check Wayland status
+check_wayland_status() {
+    if [ "$WAYLAND" = "1" ]; then
+        echo -e "${BLUE}${ICON_DESKTOP} Verifying Wayland components...${NC}"
+        if [ "$HYPRLAND" = "1" ]; then
+            if pgrep -x "Hyprland" >/dev/null; then
+                echo -e "${GREEN}${ICON_CHECK} Hyprland is running properly${NC}"
+            else
+                echo -e "${YELLOW}${ICON_WARN} Hyprland service state inconsistent${NC}"
+            fi
+            
+            # Check Hyprland-specific components 
+            for comp in "waybar" "wlogout" "hyprctl"; do
+                if command -v $comp >/dev/null; then
+                    echo -e "${GREEN}${ICON_CHECK} $comp is available${NC}"
+                else  
+                    echo -e "${YELLOW}${ICON_WARN} $comp not found${NC}"
+                    log_message "WARN" "$comp not found"
+                fi
+            done
+        fi
+    fi
+}
+
+# Run checks
+check_wayland_status
 
 # Update complete
 echo -e "\n${GREEN}╔════════════════════════════════════════════╗${NC}"
@@ -691,79 +1146,16 @@ echo -e "${GREEN}╚════════════════════
 # Detailed Summary
 echo -e "\n${CYAN}${ICON_SYSTEM} Update Summary:${NC}"
 echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
-# System Information
-echo -e "${BOLD}System Information:${NC}"
-echo -e "${BLUE}• Time Completed:${NC} $(date '+%Y-%m-%d %H:%M:%S')"
+echo -e "${BLUE}• Update Time:${NC} $(date '+%Y-%m-%d %H:%M:%S')"
 echo -e "${BLUE}• System Status:${NC} $(systemctl is-system-running)"
-echo -e "${BLUE}• Kernel Version:${NC} $(uname -r)"
-
-echo -e "\n${BOLD}Display Server Information:${NC}"
+echo -e "${BLUE}• Desktop Environment:${NC} $([[ "$KDE" = "1" ]] && echo "KDE Plasma" || echo "Other")"
 echo -e "${BLUE}• Display Server:${NC} $([[ "$WAYLAND" = "1" ]] && echo "Wayland" || echo "X11")"
-[ "$XWAYLAND" = "1" ] && echo -e "${BLUE}• XWayland:${NC} Active"
-echo -e "${BLUE}• Desktop Environment:${NC} ${DE_NAME:-"None"}"
-if [ -n "$WM_NAME" ]; then
-    echo -e "${BLUE}• Window Manager:${NC} ${WM_NAME}"
-elif [ -n "$DE_NAME" ]; then
-    echo -e "${BLUE}• Window Manager:${NC} Built-in"
-else
-    echo -e "${BLUE}• Window Manager:${NC} Unknown"
-fi
-echo -e "${BLUE}• Session Type:${NC} ${XDG_SESSION_TYPE:-"Unknown"}"
-echo -e "${BLUE}• Monitors:${NC} ${MONITOR_COUNT:-"Unknown"} ($([[ -n "$PRIMARY_MONITOR" ]] && echo "Primary: $PRIMARY_MONITOR" || echo "Configuration unknown"))"
-
-echo -e "\n${BOLD}Graphics Information:${NC}"
-echo -e "${BLUE}• Hardware Acceleration:${NC}"
-[ "$VULKAN_SUPPORT" = "1" ] && echo -e "  - Vulkan: $VULKAN_INFO"
-[ "$OPENGL_SUPPORT" = "1" ] && echo -e "  - OpenGL: $OPENGL_INFO"
-echo -e "${BLUE}• GPU Configuration:${NC}"
-[ "$NVIDIA_GPU" = "1" ] && echo -e "  - NVIDIA: $NVIDIA_MODEL (Driver: $NVIDIA_DRIVER)"
-[ "$AMD_GPU" = "1" ] && echo -e "  - AMD: $AMD_MODEL (Driver: $AMD_DRIVER)"
-[ "$INTEL_GPU" = "1" ] && echo -e "  - Intel: $INTEL_MODEL (Driver: $INTEL_DRIVER)"
-
-echo -e "\n${BOLD}Theme Configuration:${NC}"
-[ -n "$GTK_THEME" ] && echo -e "${BLUE}• GTK Theme:${NC} $GTK_THEME"
-[ -n "$QT_THEME" ] && echo -e "${BLUE}• Qt Theme:${NC} $QT_THEME"
-[ -n "$ICON_THEME" ] && echo -e "${BLUE}• Icon Theme:${NC} $ICON_THEME"
-[ -n "$COLOR_SCHEME" ] && echo -e "${BLUE}• Color Scheme:${NC} $([ "$COLOR_SCHEME" = "1" ] && echo "Dark" || echo "Light")"
-
-echo -e "\n${BOLD}Compositor:${NC} $(\
-    if [ "$HYPRLAND" = "1" ]; then echo "Hyprland"
-    elif [ "$SWAY" = "1" ]; then echo "Sway"
-    elif [ "$PICOM" = "1" ]; then echo "Picom"
-    elif [ "$COMPTON" = "1" ]; then echo "Compton"
-    elif [ "$WAYLAND" = "1" ]; then echo "Built-in Wayland"
-    elif [ -n "$DE_NAME" ]; then echo "Built-in X11"
-    else echo "None"
-    fi)"
-echo -e ""
-
-# System Resources
-echo -e "${BOLD}Current Resource Usage:${NC}"
-echo -e "${BLUE}• CPU Usage:${NC} $(top -bn1 | grep "Cpu(s)" | awk '{print $2}')%"
-echo -e "${BLUE}• Memory Usage:${NC} $(free -m | awk '/Mem:/ {printf "%.1f", $3/$2*100}')%"
-echo -e "${BLUE}• Disk Usage:${NC} $(df -h / | awk 'NR==2 {print $5}')"
-echo -e ""
-
-# Update Statistics
-echo -e "${BOLD}Package Updates:${NC}"
-echo -e "${BLUE}• System Packages:${NC} $SYSTEM_PACKAGES_UPDATED updated"
-echo -e "${BLUE}• AUR Packages:${NC} $AUR_PACKAGES_UPDATED updated"
-echo -e "${BLUE}• Flatpak Packages:${NC} $FLATPAK_PACKAGES_UPDATED updated"
-echo -e ""
-
-# System Changes
-echo -e "${BOLD}System Changes:${NC}"
-echo -e "${BLUE}• Package Cache:${NC} $cache_size_before → $cache_size_after"
-echo -e "${BLUE}• Journal Size:${NC} $journal_size_before → $journal_size_after"
-[ "$orphan_count" -gt 0 ] && echo -e "${BLUE}• Orphaned Packages:${NC} $orphan_count removed"
-echo -e ""
-
-# Log Information
-echo -e "${BOLD}Log Files:${NC}"
-echo -e "${BLUE}• Main Log:${NC} $LOG_FILE"
-echo -e "${BLUE}• Error Log:${NC} $ERROR_LOG"
-echo -e "${BLUE}• Backup Log:${NC} $BACKUP_LOG"
+echo -e "${BLUE}• Compositor:${NC} $([[ "$HYPRLAND" = "1" ]] && echo "Hyprland" || echo "Other")"
+echo -e "${BLUE}• Kernel Version:${NC} $(uname -r)"
+echo -e "${BLUE}• Log Files:${NC}"
+echo -e "  - Main Log: $LOG_FILE"
+echo -e "  - Error Log: $ERROR_LOG"
+echo -e "  - Backup Log: $BACKUP_LOG"
 
 # Reboot recommendation if kernel was updated
 # Smart reboot detection

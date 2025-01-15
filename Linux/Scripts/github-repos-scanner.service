@@ -1,0 +1,12 @@
+[Unit]
+Description=GitHub Repositories Scanner
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/duckyonquack999/.local/bin/github-repos-scanner.sh
+User=duckyonquack999
+
+[Install]
+WantedBy=multi-user.target
+

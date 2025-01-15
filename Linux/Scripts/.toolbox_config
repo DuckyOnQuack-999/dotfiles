@@ -1,0 +1,9 @@
+BACKUP_DIR="/home/duckyonquack999/backups"
+LOG_DIR="/home/duckyonquack999/.toolbox/logs"
+MAX_LOG_SIZE="100M"
+ENABLE_NOTIFICATIONS=true
+DARK_MODE=true
+EXPERT_MODE=false
+AUTO_BACKUP=true
+BACKUP_INTERVAL=604800
+LAST_BACKUP=0

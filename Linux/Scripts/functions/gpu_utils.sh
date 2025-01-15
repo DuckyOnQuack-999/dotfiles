@@ -1,0 +1,8 @@
+#!/bin/bash
+detect_gpu_details() { local NC="[0m"; local RED="[0;31m"; local GREEN="[0;32m"; local YELLOW="[1;33m"; local BLUE="[0;34m"; local CYAN="[0;36m"; local ICON_ERROR="✗"; local ICON_SYSTEM="🖥"; local ICON_WARN="⚠"; echo -e "
+${CYAN}${ICON_SYSTEM} GPU Information:${NC}"; if ! command -v lspci &> /dev/null; then echo -e "${RED}${ICON_ERROR} lspci command not found${NC}"; return 1; fi; echo -e "
+${BLUE}Detected GPUs:${NC}"; lspci | grep -i "vga\|3d\|2d" | sed "s/^/  /"; if lspci | grep -i nvidia &> /dev/null; then echo -e "
+${BLUE}NVIDIA Driver Information:${NC}"; if command -v nvidia-smi &> /dev/null; then nvidia-smi --query-gpu=gpu_name,driver_version,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader | sed "s/^/  /"; else echo -e "  ${YELLOW}${ICON_WARN} NVIDIA drivers not installed${NC}"; fi; fi; if lspci | grep -i amd &> /dev/null; then echo -e "
+${BLUE}AMD GPU Information:${NC}"; if [ -d "/sys/class/drm/card0/device" ]; then echo -n "  Driver: "; cat /sys/class/drm/card0/device/driver/module/version 2>/dev/null || echo "Unknown"; fi; fi; if lspci | grep -i "intel.*graphics" &> /dev/null; then echo -e "
+${BLUE}Intel GPU Information:${NC}"; if command -v intel_gpu_top &> /dev/null; then echo "  Intel GPU tools installed"; else echo -e "  ${YELLOW}${ICON_WARN} intel-gpu-tools not installed${NC}"; fi; fi; echo -e "
+${BLUE}Vulkan Support:${NC}"; if command -v vulkaninfo &> /dev/null; then vulkaninfo --summary 2>/dev/null | grep -E "GPU|Driver" | sed "s/^/  /"; else echo -e "  ${YELLOW}${ICON_WARN} vulkaninfo not installed${NC}"; fi; return 0; }
