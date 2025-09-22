@@ -26,7 +26,7 @@ yay -S --needed \
     wob \
     hyperpaper \
     pyprland
-
+a
 # Create enhanced Hyprland configuration
 cat << 'EEOF' > ~/.config/hypr/hyprland.conf
 # Source additional config files
@@ -79,6 +79,10 @@ decoration {
     col.shadow = rgba(1a1a1aee)
     dim_inactive = true
     dim_strength = 0.1
+    popups = true
+    popups_ignorealpha = 0.6
+    input_methods = true
+    input_methods_ignorealpha = 0.8
 }
 
 # Enhanced input configuration
@@ -249,7 +253,26 @@ $mainMod = SUPER
 
 # Advanced window management
 bind = $mainMod, Q, killactive,
-bind = $mainMod SHIFT, Q, exec, ~/.config/hypr/scripts/close-all-windows.sh
+bind = $mainMod cat << 'EEOF' > ~/.config/hypr/scripts/generate-colors.sh
+#!/usr/bin/env bash
+
+# Generate color scheme from wallpaper
+wal -i ~/wallpaper.jpg
+
+# Update Hyprland colors
+source ~/.cache/wal/colors.sh
+
+cat > ~/.config/hypr/colors.conf << EOF
+general {
+    col.active_border = rgba(${color2:1}ee) rgba(${color4:1}ee) 45deg
+    col.inactive_border = rgba(${color8:1}aa)
+}
+
+decoration {
+    col.shadow = rgba(${color0:1}ee)
+    col.shadow_inactive = rgba(${color8:1}aa)
+}
+SHIFT, Q, exec, ~/.config/hypr/scripts/close-all-windows.sh
 bind = $mainMod, F, fullscreen, 1
 bind = $mainMod SHIFT, F, fullscreen, 0
 bind = $mainMod, V, togglefloating,
@@ -296,7 +319,7 @@ cat << 'EEOF' > ~/.config/hypr/scripts/generate-colors.sh
 # Generate color scheme from wallpaper
 wal -i ~/wallpaper.jpg
 
-# Update Hyprland colors
+# Update Hyprland colors 
 source ~/.cache/wal/colors.sh
 
 cat > ~/.config/hypr/colors.conf << EOF
@@ -309,3 +332,4 @@ decoration {
     col.shadow = rgba(${color0:1}ee)
     col.shadow_inactive = rgba(${color8:1}aa)
 }
+EEOF
